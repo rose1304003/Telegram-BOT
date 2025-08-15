@@ -213,10 +213,11 @@ def setup_scheduler(app: Application):
     async def run_scheduled_job():
         await scheduled_digest_job(app)
 
-    # Directly schedule the coroutine without calling get_event_loop()
+    loop = asyncio.get_running_loop()  # get the bot's active loop
+    scheduler.configure(event_loop=loop)  # make scheduler use this loop
     scheduler.add_job(run_scheduled_job, CronTrigger(minute="*"))
     scheduler.start()
-
+    
 def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -236,7 +237,11 @@ def build_app() -> Application:
 def main():
     ensure_db(DB_PATH)
     app = build_app()
-    setup_scheduler(app)
+
+    async def on_startup(_: Application):
+        setup_scheduler(app)
+
+    app.post_init = on_startup  # runs after loop starts
 
     log.info("Deleting webhook (if any) and starting long-polling worker...")
     app.run_polling(
@@ -245,5 +250,7 @@ def main():
         drop_pending_updates=False
     )
 
+
 if __name__ == "__main__":
     main()
+
