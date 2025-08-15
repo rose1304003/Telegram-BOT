@@ -104,14 +104,14 @@ class Storage:
                 ON CONFLICT(chat_id) DO UPDATE SET keywords=excluded.keywords
             """, (chat_id, kws))
 
-   def get_keywords(self, chat_id: int) -> str:
-    with sqlite3.connect(self.path) as con:
-        cur = con.execute("SELECT keywords FROM chat_settings WHERE chat_id=?", (chat_id,))
-        row = cur.fetchone()
-        if not row or not row[0]:
-            return ""
-        return row[0].strip()
-      
+    def get_keywords(self, chat_id: int) -> str:
+        with sqlite3.connect(self.path) as con:
+            cur = con.execute("SELECT keywords FROM chat_settings WHERE chat_id=?", (chat_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return ""
+            return row[0].strip()
+
     def all_chats(self) -> List[int]:
         """Возвращает все чаты, где бот работает (из сообщений и настроек)."""
         with sqlite3.connect(self.path) as con:
@@ -121,5 +121,3 @@ class Storage:
                 SELECT DISTINCT chat_id FROM chat_settings
             """)
             return [r[0] for r in cur.fetchall()]
-
-
