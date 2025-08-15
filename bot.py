@@ -209,11 +209,12 @@ async def scheduled_digest_job(app: Application):
                 log.exception("Failed to send scheduled digest to %s: %s", chat_id, e)
 
 def setup_scheduler(app: Application):
-    # run every minute; the job itself checks HH:MM match
-    scheduler.add_job(lambda: asyncio.create_task(scheduled_digest_job(app)),
+    async def run_scheduled_job():
+        await scheduled_digest_job(app)
+
+    scheduler.add_job(lambda: asyncio.get_event_loop().create_task(run_scheduled_job()),
                       CronTrigger(minute="*"))
     scheduler.start()
-
 def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -246,3 +247,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
