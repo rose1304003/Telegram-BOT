@@ -3,7 +3,6 @@ import logging
 import asyncio
 import re
 from datetime import datetime, timedelta
-from typing import List, Tuple
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,6 +22,7 @@ from summarizer import summarize_window, build_keyword_flags
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("chatgpt-secretary")
 
+# --- ENV ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -39,8 +39,10 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 storage = Storage(DB_PATH)
 
+# Single global scheduler in LOCAL_TZ
 scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
 
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Bot ishga tushdi. Dayjestlar uchun xabarlarni to'plab boraman.\n"
@@ -57,16 +59,27 @@ async def set_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _allowed_chat(update):
         return
     chat_id = update.effective_chat.id
-    text = " ".join(context.args)
+    text = " ".join(context.args).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "❌ Siz kalit so'zlar kiritmadingiz.\n"
+            "Foydalanish: /set_keywords so'z1, so'z2, so'z3"
+        )
+        return
+
     storage.set_keywords(chat_id, text)
-    await update.message.reply_text(f"🔎 🔎 Kalit so'zlar yangilandi:\n{text or '—'}")
+    await update.message.reply_text(f"✅ Kalit so'zlar yangilandi:\n{text}")
 
 async def show_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _allowed_chat(update):
         return
     chat_id = update.effective_chat.id
     kw = storage.get_keywords(chat_id) or os.getenv("TRACKED_KEYWORDS", "")
-    await update.message.reply_text(f"🔎 Kuzatilayotgan so'zlar:\n{kw or '—'}")
+    if not kw:
+        await update.message.reply_text("🔎 Kuzatilayotgan so'zlar:\n— (hali o'rnatilmagan)")
+    else:
+        await update.message.reply_text(f"🔎 Kuzatilayotgan so'zlar:\n{kw}")
 
 async def save_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Store messages from groups/supergroups and trigger keyword alerts."""
@@ -161,7 +174,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"• @{r['username'] or r['user_id']}: {r['text'][:150]}" for r in rows]
     await update.message.reply_text("Topildi:\n" + "\n".join(lines))
 
-
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat ID: {chat.id} (type: {chat.type})")
@@ -183,7 +195,6 @@ async def scheduled_digest_job(app: Application):
     chats = storage.all_chats()
     now = datetime.now()
     for chat_id in chats:
-        # check if it's the stored digest time (minute-level match in LOCAL_TZ)
         t = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
         h, m = map(int, t.split(":"))
         if now.hour == h and now.minute == m:
@@ -198,12 +209,12 @@ async def scheduled_digest_job(app: Application):
                 log.exception("Failed to send scheduled digest to %s: %s", chat_id, e)
 
 def setup_scheduler(app: Application):
+    # run every minute; the job itself checks HH:MM match
     scheduler.add_job(lambda: asyncio.create_task(scheduled_digest_job(app)),
-                      CronTrigger(minute="*"))  # run every minute to check HH:MM match
+                      CronTrigger(minute="*"))
     scheduler.start()
 
-def main():
-    ensure_db(DB_PATH)
+def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -217,11 +228,21 @@ def main():
     application.add_handler(CommandHandler("set_keywords", set_keywords))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_message))
+    return application
 
-    setup_scheduler(application)
+def main():
+    ensure_db(DB_PATH)
+    app = build_app()
+    setup_scheduler(app)
 
-    log.info("Bot started. Listening for updates...")
-    application.run_polling(close_loop=False)
+    log.info("Deleting webhook (if any) and starting long-polling worker...")
+    # Option A: pure worker process using polling, no public URL needed.
+    # PTB will delete webhook for us if we pass drop_pending_updates=...
+    app.run_polling(
+        stop_signals=None,         # keep alive on PaaS workers
+        close_loop=False,          # don't close event loop (friendlier on some hosts)
+        drop_pending_updates=False # set True if you want to discard backlog when rebooting
+    )
 
 if __name__ == "__main__":
     main()
