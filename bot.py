@@ -208,13 +208,15 @@ async def scheduled_digest_job(app: Application):
             except Exception as e:
                 log.exception("Failed to send scheduled digest to %s: %s", chat_id, e)
 
+# --- FIXED ---
 def setup_scheduler(app: Application):
     async def run_scheduled_job():
         await scheduled_digest_job(app)
 
-    scheduler.add_job(lambda: asyncio.get_event_loop().create_task(run_scheduled_job()),
-                      CronTrigger(minute="*"))
+    # Directly schedule the coroutine without calling get_event_loop()
+    scheduler.add_job(run_scheduled_job, CronTrigger(minute="*"))
     scheduler.start()
+
 def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -237,14 +239,11 @@ def main():
     setup_scheduler(app)
 
     log.info("Deleting webhook (if any) and starting long-polling worker...")
-    # Option A: pure worker process using polling, no public URL needed.
-    # PTB will delete webhook for us if we pass drop_pending_updates=...
     app.run_polling(
-        stop_signals=None,         # keep alive on PaaS workers
-        close_loop=False,          # don't close event loop (friendlier on some hosts)
-        drop_pending_updates=False # set True if you want to discard backlog when rebooting
+        stop_signals=None,
+        close_loop=False,
+        drop_pending_updates=False
     )
 
 if __name__ == "__main__":
     main()
-
