@@ -111,7 +111,7 @@ class Storage:
         if not row or not row[0]:
             return ""
         return row[0].strip()
-
+      
     def all_chats(self) -> List[int]:
         """Возвращает все чаты, где бот работает (из сообщений и настроек)."""
         with sqlite3.connect(self.path) as con:
@@ -121,4 +121,5 @@ class Storage:
                 SELECT DISTINCT chat_id FROM chat_settings
             """)
             return [r[0] for r in cur.fetchall()]
+
 
