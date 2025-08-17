@@ -41,54 +41,65 @@ class Storage:
         self.path = path
         ensure_db(self.path)
 
-    def save_message(self, chat_id: int, message_id: int, user_id: int, username: str, text: str, date: int):
+    def insert_message(self, chat_id: int, message_id: int, user_id: int, username: str, text: str, date: int):
         with sqlite3.connect(self.path) as con:
-            con.execute(
-                "INSERT INTO messages(chat_id, message_id, user_id, username, text, date) VALUES (?,?,?,?,?,?)",
-                (chat_id, message_id, user_id, username, text, date)
-            )
+            con.execute("""
+              INSERT INTO messages(chat_id, message_id, user_id, username, text, date)
+              VALUES (?, ?, ?, ?, ?, ?)
+            """, (chat_id, message_id, user_id, username, text, date))
 
-    def get_messages(self, chat_id: int, since: int, until: int) -> List[Dict]:
-        with sqlite3.connect(self.path) as con:
-            con.row_factory = sqlite3.Row
-            cur = con.execute(
-                "SELECT user_id, username, text, date FROM messages "
-                "WHERE chat_id=? AND date BETWEEN ? AND ? ORDER BY date ASC",
-                (chat_id, since, until)
-            )
-            return [dict(r) for r in cur.fetchall()]
-
-    def search_messages(self, chat_id: int, query: str, limit: int = 20) -> List[Dict]:
+    def get_messages(self, chat_id: int, since_ts: int) -> List[Dict]:
         with sqlite3.connect(self.path) as con:
             con.row_factory = sqlite3.Row
             cur = con.execute("""
-                SELECT m.user_id, m.username, m.text
-                FROM fts_messages f
-                JOIN messages m ON m.id = f.rowid
-                WHERE m.chat_id = ? AND f.fts_messages MATCH ?
-                ORDER BY m.date DESC LIMIT ?
-            """, (chat_id, query, limit))
+                SELECT m.*
+                FROM messages m
+                WHERE m.chat_id=? AND m.date>=?
+                ORDER BY m.date ASC
+            """, (chat_id, since_ts))
             return [dict(r) for r in cur.fetchall()]
 
-    def top_users(self, chat_id: int, since: int, limit: int = 10) -> List[Tuple[int, str, int]]:
+    def top_users(self, chat_id: int, since_ts: int, limit: int = 10) -> List[Dict]:
         with sqlite3.connect(self.path) as con:
+            con.row_factory = sqlite3.Row
             cur = con.execute("""
-                SELECT user_id, COALESCE(username, '') AS username, COUNT(*) as cnt
+                SELECT user_id, username, COUNT(*) as cnt
                 FROM messages
                 WHERE chat_id=? AND date>=?
                 GROUP BY user_id, username
                 ORDER BY cnt DESC
                 LIMIT ?
-            """, (chat_id, since, limit))
-            return [(r[0], r[1] or None, r[2]) for r in cur.fetchall()]
+            """, (chat_id, since_ts, limit))
+            return [dict(r) for r in cur.fetchall()]
 
-    def set_digest_time(self, chat_id: int, hhmm: str):
+    def count_messages(self, chat_id: int, since_ts: int) -> int:
+        with sqlite3.connect(self.path) as con:
+            cur = con.execute("""
+                SELECT COUNT(*) FROM messages WHERE chat_id=? AND date>=?
+            """, (chat_id, since_ts))
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def search(self, chat_id: int, query: str, limit: int = 20) -> List[Dict]:
+        with sqlite3.connect(self.path) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.execute("""
+                SELECT m.*
+                FROM fts_messages f
+                JOIN messages m ON m.id = f.rowid
+                WHERE m.chat_id=? AND f.text MATCH ?
+                ORDER BY m.date DESC
+                LIMIT ?
+            """, (chat_id, query, limit))
+            return [dict(r) for r in cur.fetchall()]
+
+    def set_digest_time(self, chat_id: int, time_str: str):
         with sqlite3.connect(self.path) as con:
             con.execute("""
                 INSERT INTO chat_settings(chat_id, digest_time)
                 VALUES (?,?)
                 ON CONFLICT(chat_id) DO UPDATE SET digest_time=excluded.digest_time
-            """, (chat_id, hhmm))
+            """, (chat_id, time_str))
 
     def get_digest_time(self, chat_id: int) -> str:
         with sqlite3.connect(self.path) as con:
