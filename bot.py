@@ -1,4 +1,6 @@
 import os
+import io
+import csv
 import logging
 import asyncio
 import re
@@ -31,6 +33,10 @@ LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Tashkent")
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
 
+# NEW: control public replies on keyword hits (default = silent)
+KEYWORD_REPLY = os.getenv("KEYWORD_REPLY", "0") == "1"
+log.info(f"KEYWORD_REPLY={KEYWORD_REPLY}")
+
 # optional allow-list of chat ids (comma-separated)
 ALLOWED_CHAT_IDS = [int(cid) for cid in os.getenv("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if cid]
 
@@ -59,7 +65,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/digest_week — 7 kunlik xulosa\n"
         "/digest_time HH:MM — kunlik digest vaqti\n"
         "/keywords — kuzatilayotgan so‘zlar\n"
-        "/set_keywords a,b,c — ro‘yxatni yangilash"
+        "/set_keywords a,b,c — ro‘yxatni yangilash\n"
+        "/hits_today — bugungi keyword hitlar soni\n"
+        "/export_hits [kun] — CSV eksport (default 7)"
     )
 
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,7 +151,8 @@ async def show_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(update.effective_chat.id):
         return
     kws = storage.get_keywords(update.effective_chat.id)
-    msg = f"Kuzatilayotgan so‘zlar: {kws or '(yo‘q)'}"
+    # Use simple concat to avoid quote issues in f-strings
+    msg = "Kuzatilayotgan so‘zlar: " + (kws if kws else "(yo‘q)")
     await update.message.reply_text(msg)
 
 async def set_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,7 +160,45 @@ async def set_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     kws = " ".join(context.args) if context.args else ""
     storage.set_keywords(update.effective_chat.id, kws)
-    await update.message.reply_text(f"Kuzatilayotgan so‘zlar yangilandi: {kws or '(bo‘sh)'}")
+    await update.message.reply_text("Kuzatilayotgan so‘zlar yangilandi: " + (kws if kws else "(bo‘sh)"))
+
+# --- Extra: simple counters/exports for keyword hits (works if storage has keyword_hits methods)
+async def hits_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
+        return
+    since = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    if hasattr(storage, "count_hits"):
+        n = storage.count_hits(update.effective_chat.id, since)
+        await update.message.reply_text(f"Bugun kalit so‘z topilgan xabarlar: {n}")
+    else:
+        await update.message.reply_text("Keyword hits hisoboti yoqilmagan (storage.py yangilash kerak).")
+
+async def export_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
+        return
+    if not hasattr(storage, "get_hits"):
+        await update.message.reply_text("Keyword hits eksporti yoqilmagan (storage.py yangilash kerak).")
+        return
+    try:
+        days = int(context.args[0]) if context.args else 7
+    except Exception:
+        days = 7
+    since = int((datetime.utcnow() - timedelta(days=days)).timestamp())
+    rows = storage.get_hits(update.effective_chat.id, since)
+    if not rows:
+        await update.message.reply_text(f"Oxirgi {days} kunda kalit so‘z topilmadi.")
+        return
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["datetime_utc", "user", "matched_keywords", "message"])
+    for r in rows:
+        ts = datetime.utcfromtimestamp(r["date"]).strftime("%Y-%m-%d %H:%M")
+        user = ("@" + r["username"]) if r.get("username") else (str(r.get("user_id") or ""))
+        w.writerow([ts, user, r["matched"], r["text"].replace("\n", " ")])
+    data = buf.getvalue().encode("utf-8-sig")
+    bio = io.BytesIO(data); bio.name = f"keyword_hits_{days}d.csv"
+    await update.message.reply_document(document=bio, filename=bio.name,
+                                        caption=f"Kalit so‘zlar bo‘yicha hitlar — oxirgi {days} kun")
 
 # --- Message capture ---
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,11 +225,32 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
     )
 
-    # Keyword alert (optional)
+    # Keyword alert (now silent; optional DB logging)
     kws = storage.get_keywords(chat.id) or ""
     hits = build_keyword_flags(msg.text, kws)
     if hits:
-        await msg.reply_text("Topilgan kalit so‘zlar: " + ", ".join(hits))
+        # Persist hit if storage supports it
+        if hasattr(storage, "insert_keyword_hit"):
+            try:
+                storage.insert_keyword_hit(
+                    chat_id=chat.id,
+                    message_id=msg.message_id,
+                    user_id=msg.from_user.id if msg.from_user else None,
+                    username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
+                    matched=",".join(hits),
+                    text=msg.text,
+                    date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+                )
+            except Exception as e:
+                log.warning("Failed to insert keyword hit: %s", e)
+
+        # Always log to server logs for admins
+        log.info("Keyword hit in chat %s: %s | %s",
+                 chat.id, ", ".join(hits), msg.text[:200].replace("\n", " "))
+
+        # Only reply publicly if KEYWORD_REPLY=1
+        if KEYWORD_REPLY:
+            await msg.reply_text("Topilgan kalit so‘zlar: " + ", ".join(hits))
 
 # --- Helpers ---
 def allow_chat(chat_id: int) -> bool:
@@ -225,6 +293,10 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("keywords", show_keywords))
     application.add_handler(CommandHandler("set_keywords", set_keywords))
 
+    # Extra (only useful if storage has keyword_hits):
+    application.add_handler(CommandHandler("hits_today", hits_today))
+    application.add_handler(CommandHandler("export_hits", export_hits))
+
     # capture every text message
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
@@ -237,8 +309,6 @@ def main():
     setup_scheduler(app)
 
     log.info("Deleting webhook (if any) and starting long-polling worker...")
-    # Option A: pure worker process using polling, no public URL needed.
-    # PTB will delete webhook for us if we pass drop_pending_updates=...
     app.run_polling(
         stop_signals=None,         # keep alive on PaaS workers
         close_loop=False,          # don't close event loop (friendlier on some hosts)
