@@ -5,7 +5,8 @@ import re
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
-load_dotenv()
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -27,8 +28,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Tashkent")
-DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
+DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
+
+# optional allow-list of chat ids (comma-separated)
 ALLOWED_CHAT_IDS = [int(cid) for cid in os.getenv("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if cid]
 
 if not TELEGRAM_BOT_TOKEN:
@@ -44,180 +47,171 @@ scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
+        return
     await update.message.reply_text(
-        "✅ Bot ishga tushdi. Dayjestlar uchun xabarlarni to'plab boraman.\n"
-        "Guruh: /search, /stats, /digest_today, /digest_week, /digest_time HH:MM, /keywords, /set_keywords ..."
+        "Bot ishga tushdi ✅\n"
+        "Buyruqlar:\n"
+        "/chatid — joriy chat ID\n"
+        "/search <so‘rov> — tarix bo‘yicha qidirish\n"
+        "/stats — 7 kunlik oddiy statistika\n"
+        "/digest_today — bugungi xulosa\n"
+        "/digest_week — 7 kunlik xulosa\n"
+        "/digest_time HH:MM — kunlik digest vaqti\n"
+        "/keywords — kuzatilayotgan so‘zlar\n"
+        "/set_keywords a,b,c — ro‘yxatni yangilash"
     )
 
-def _allowed_chat(update: Update) -> bool:
-    if not ALLOWED_CHAT_IDS:
-        return True
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    return chat_id in ALLOWED_CHAT_IDS
-
-async def set_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
         return
-    chat_id = update.effective_chat.id
-    text = " ".join(context.args).strip()
+    await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
 
-    if not text:
-        await update.message.reply_text(
-            "❌ Siz kalit so'zlar kiritmadingiz.\n"
-            "Foydalanish: /set_keywords so'z1, so'z2, so'z3"
-        )
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
         return
-
-    storage.set_keywords(chat_id, text)
-    await update.message.reply_text(f"✅ Kalit so'zlar yangilandi:\n{text}")
-
-async def show_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text("Foydalanish: /search so‘rov")
         return
-    chat_id = update.effective_chat.id
-    kw = storage.get_keywords(chat_id) or os.getenv("TRACKED_KEYWORDS", "")
-    if not kw:
-        await update.message.reply_text("🔎 Kuzatilayotgan so'zlar:\n— (hali o'rnatilmagan)")
-    else:
-        await update.message.reply_text(f"🔎 Kuzatilayotgan so'zlar:\n{kw}")
-
-async def save_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store messages from groups/supergroups and trigger keyword alerts."""
-    message = update.effective_message
-    chat = update.effective_chat
-
-    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+    results = storage.search(update.effective_chat.id, query, limit=20)
+    if not results:
+        await update.message.reply_text("Hech narsa topilmadi.")
         return
-    if not _allowed_chat(update):
-        return
-    if not message or not message.text:
-        return
-    if message.from_user and message.from_user.is_bot:
-        return
+    lines = []
+    for r in results:
+        ts = datetime.fromtimestamp(r["date"]).strftime("%Y-%m-%d %H:%M")
+        user = f"@{r['username']}" if r["username"] else r["user_id"]
+        snippet = (r["text"][:200] + "…") if len(r["text"]) > 200 else r["text"]
+        lines.append(f"• {ts} — {user}: {snippet}")
+    await update.message.reply_text("\n".join(lines))
 
-    storage.save_message(
-        chat_id=chat.id,
-        message_id=message.message_id,
-        user_id=message.from_user.id if message.from_user else None,
-        username=message.from_user.username if message.from_user else None,
-        text=message.text,
-        date=int(message.date.timestamp())
-    )
-
-    # Keyword flags
-    kws = storage.get_keywords(chat.id) or os.getenv("TRACKED_KEYWORDS", "")
-    flags = build_keyword_flags(message.text, kws)
-    if flags:
-        await message.reply_text(f"📌 Topilgan kalit so'zlar: {', '.join(flags)}")
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
+        return
+    since = int((datetime.utcnow() - timedelta(days=7)).timestamp())
+    top = storage.top_users(update.effective_chat.id, since, limit=10)
+    total = storage.count_messages(update.effective_chat.id, since)
+    if not total:
+        await update.message.reply_text("7 kunlik statistika bo‘sh.")
+        return
+    lines = [f"Oxirgi 7 kunda jami xabarlar: {total}", "Top ishtirokchilar:"]
+    for u in top:
+        uname = f"@{u['username']}" if u["username"] else u["user_id"]
+        lines.append(f"• {uname} — {u['cnt']} ta")
+    await update.message.reply_text("\n".join(lines))
 
 async def digest_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+    if not allow_chat(update.effective_chat.id):
         return
-    chat_id = update.effective_chat.id
-    now = datetime.now()
-    start = now - timedelta(days=1)
-    msgs = storage.get_messages(chat_id, int(start.timestamp()), int(now.timestamp()))
+    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    since = int(day_start.timestamp())
+    msgs = storage.get_messages(update.effective_chat.id, since)
     if not msgs:
-        await update.message.reply_text("Son'ngi 24 soatda xabarlar yo'q.")
-        await update.message.reply_text("За последние 24 часа сообщений нет.")
+        await update.message.reply_text("Bugun uchun xabarlar yo‘q.")
         return
-    digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="So'ngi 24 soat")
+    digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="(bugun)")
     await update.message.reply_text(digest, parse_mode=ParseMode.MARKDOWN)
 
 async def digest_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+    if not allow_chat(update.effective_chat.id):
         return
-    chat_id = update.effective_chat.id
-    now = datetime.now()
-    start = now - timedelta(days=7)
-    msgs = storage.get_messages(chat_id, int(start.timestamp()), int(now.timestamp()))
+    since = int((datetime.utcnow() - timedelta(days=7)).timestamp())
+    msgs = storage.get_messages(update.effective_chat.id, since)
     if not msgs:
-        await update.message.reply_text("So'ngi ohirgi haftada xabarlar yo'q.")
+        await update.message.reply_text("7 kunlik xabarlar yo‘q.")
         return
-    digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="So'ngi 7 kun")
-    if not digest:
-        await update.message.reply_text("Daydjest yaratishda xatolik yuz berdi.")
-        return
+    digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="(7 kun)")
     await update.message.reply_text(digest, parse_mode=ParseMode.MARKDOWN)
 
-time_re = re.compile(r"^(?P<h>\d{1,2}):(?P<m>\d{2})$")
-
 async def digest_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+    if not allow_chat(update.effective_chat.id):
         return
-    chat_id = update.effective_chat.id
     if not context.args:
-        current = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
-        await update.message.reply_text(f"⏰ Joriy kunlik dayjest vaqti: {current}")
+        cur = storage.get_digest_time(update.effective_chat.id) or DEFAULT_DIGEST_TIME
+        await update.message.reply_text(f"Hozirgi kunlik digest vaqti: {cur}\n"
+                                        f"Namuna: /digest_time 21:30")
         return
-    t = context.args[0]
-    m = time_re.match(t)
-    if not m or not (0 <= int(m['h']) < 24 and 0 <= int(m['m']) < 60):
-        await update.message.reply_text("Vaqtni HH:MM formatida kiriting, masalan: /digest_time 21:30")
+    time_str = context.args[0]
+    if not re.match(r"^\d{2}:\d{2}$", time_str):
+        await update.message.reply_text("Iltimos HH:MM formatida kiriting, masalan: 21:30")
         return
-    storage.set_digest_time(chat_id, t)
-    await update.message.reply_text(f"✅ Kunlik dayjest vaqti yangilandi:{t}\n"
-                                    f"Men dayjestni har kuni shu vaqtda yuboraman.")
+    storage.set_digest_time(update.effective_chat.id, time_str)
+    await update.message.reply_text(f"Kunlik digest vaqti yangilandi: {time_str}")
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+async def show_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
         return
-    chat_id = update.effective_chat.id
-    q = " ".join(context.args).strip()
-    if not q:
-        await update.message.reply_text("Foydalanish: /search so‘rov")
-        return
-    rows = storage.search_messages(chat_id, q, limit=20)
-    if not rows:
-        await update.message.reply_text("Hech narsa topilmadi.")
-        return
-    lines = [f"• @{r['username'] or r['user_id']}: {r['text'][:150]}" for r in rows]
-    await update.message.reply_text("Topildi:\n" + "\n".join(lines))
+    kws = storage.get_keywords(update.effective_chat.id)
+    msg = f"Kuzatilayotgan so‘zlar: {kws or '(yo‘q)'}"
+    await update.message.reply_text(msg)
 
-async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allow_chat(update.effective_chat.id):
+        return
+    kws = " ".join(context.args) if context.args else ""
+    storage.set_keywords(update.effective_chat.id, kws)
+    await update.message.reply_text(f"Kuzatilayotgan so‘zlar yangilandi: {kws or '(bo‘sh)'}")
+
+# --- Message capture ---
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
     chat = update.effective_chat
-    await update.message.reply_text(f"Chat ID: {chat.id} (type: {chat.type})")
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _allowed_chat(update):
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # You may choose to store DMs too; we skip here
+        pass
+
+    if not allow_chat(chat.id):
         return
-    chat_id = update.effective_chat.id
-    now = datetime.now()
-    start = now - timedelta(days=7)
-    top = storage.top_users(chat_id, since=int(start.timestamp()), limit=10)
-    if not top:
-        await update.message.reply_text("So'nggi 7 kun bo'yicha statistika yo'q.")
+
+    # Only store text messages
+    if not msg or not msg.text:
         return
-    lines = [f"{i+1}. @{u or uid}: {cnt}" for i, (uid, u, cnt) in enumerate(top)]
-    await update.message.reply_text("*So'nggi 7 kun ichidagi eng faol ishtirokchilar:*\n" + "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
-async def scheduled_digest_job(app: Application):
-    chats = storage.all_chats()
-    now = datetime.now()
-    for chat_id in chats:
-        t = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
-        h, m = map(int, t.split(":"))
-        if now.hour == h and now.minute == m:
-            start = now - timedelta(days=1)
-            msgs = storage.get_messages(chat_id, int(start.timestamp()), int(now.timestamp()))
-            if not msgs:
-                continue
-            try:
-                digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="за последние 24 часа")
-                await app.bot.send_message(chat_id=chat_id, text=digest, parse_mode=ParseMode.MARKDOWN)
-            except Exception as e:
-                log.exception("Failed to send scheduled digest to %s: %s", chat_id, e)
+    storage.insert_message(
+        chat_id=chat.id,
+        message_id=msg.message_id,
+        user_id=msg.from_user.id if msg.from_user else None,
+        username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
+        text=msg.text,
+        date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+    )
 
-# --- FIXED ---
+    # Keyword alert (optional)
+    kws = storage.get_keywords(chat.id) or ""
+    hits = build_keyword_flags(msg.text, kws)
+    if hits:
+        await msg.reply_text("Topilgan kalit so‘zlar: " + ", ".join(hits))
+
+# --- Helpers ---
+def allow_chat(chat_id: int) -> bool:
+    if not ALLOWED_CHAT_IDS:
+        return True
+    return chat_id in ALLOWED_CHAT_IDS
+
 def setup_scheduler(app: Application):
-    async def run_scheduled_job():
-        await scheduled_digest_job(app)
+    async def daily_digest_job():
+        # For every chat with activity/settings, check whether we should send digest now
+        now_local = datetime.now().strftime("%H:%M")
+        for chat_id in storage.all_chats():
+            desired = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
+            if desired == now_local:
+                # pull messages since local midnight
+                day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                since = int(day_start.timestamp())
+                msgs = storage.get_messages(chat_id, since)
+                if not msgs:
+                    continue
+                digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="(kunlik)")
+                try:
+                    await app.bot.send_message(chat_id=chat_id, text=digest, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    log.warning("Failed to send digest to %s: %s", chat_id, e)
 
-    loop = asyncio.get_running_loop()  # get the bot's active loop
-    scheduler.configure(event_loop=loop)  # make scheduler use this loop
-    scheduler.add_job(run_scheduled_job, CronTrigger(minute="*"))
+    scheduler.add_job(daily_digest_job, CronTrigger(minute="*"))
     scheduler.start()
-    
+
 def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -231,26 +225,25 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("keywords", show_keywords))
     application.add_handler(CommandHandler("set_keywords", set_keywords))
 
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_message))
+    # capture every text message
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+
     return application
 
 def main():
     ensure_db(DB_PATH)
+
     app = build_app()
-
-    async def on_startup(_: Application):
-        setup_scheduler(app)
-
-    app.post_init = on_startup  # runs after loop starts
+    setup_scheduler(app)
 
     log.info("Deleting webhook (if any) and starting long-polling worker...")
+    # Option A: pure worker process using polling, no public URL needed.
+    # PTB will delete webhook for us if we pass drop_pending_updates=...
     app.run_polling(
-        stop_signals=None,
-        close_loop=False,
-        drop_pending_updates=False
+        stop_signals=None,         # keep alive on PaaS workers
+        close_loop=False,          # don't close event loop (friendlier on some hosts)
+        drop_pending_updates=False # set True if you want to discard backlog when rebooting
     )
-
 
 if __name__ == "__main__":
     main()
-
