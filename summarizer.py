@@ -38,14 +38,13 @@ async def summarize_window(client, model: str, msgs: List[Dict], period_label: s
                 ]
             )
             partial_summaries.append(resp.choices[0].message.content.strip())
-
         final_input = "\n\n".join(f"Блок {i+1}: {s}" for i, s in enumerate(partial_summaries))
         final = await aclient.chat.completions.create(
             model=model,
             temperature=0.2,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Объедини кратко все блоки {period_label} в единый дайджест с заголовками:\n{final_input}"}
+                {"role": "user", "content": f"Собери общий краткий дайджест {period_label} по блокам ниже.\n{final_input}"}
             ]
         )
         return final.choices[0].message.content.strip()
@@ -68,7 +67,7 @@ async def summarize_window(client, model: str, msgs: List[Dict], period_label: s
             temperature=0.2,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Объедини кратко все блоки {period_label} в единый дайджест с заголовками:\n{final_input}"}
+                {"role": "user", "content": f"Собери общий краткий дайджест {period_label} по блокам ниже.\n{final_input}"}
             ]
         )
         return final.choices[0].message.content.strip()
@@ -76,11 +75,11 @@ async def summarize_window(client, model: str, msgs: List[Dict], period_label: s
 def build_keyword_flags(text: str, keywords_csv: str):
     if not keywords_csv:
         return []
-    flags = []
+    hits = []
     for raw in keywords_csv.split(","):
         k = raw.strip()
         if not k:
             continue
         if re.search(rf"\b{re.escape(k)}\b", text, flags=re.IGNORECASE):
-            flags.append(k)
-    return flags
+            hits.append(k)
+    return hits
