@@ -1,6 +1,7 @@
 import os, io, csv, logging, re
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo  # <-- local time support
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
@@ -28,7 +29,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL       = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-LOCAL_TZ           = os.getenv("LOCAL_TZ", "Asia/Tashkent")
+LOCAL_TZ           = os.getenv("LOCAL_TZ", "Asia/Tashkent")  # Uzbekistan time by default
+TZ                 = ZoneInfo(LOCAL_TZ)
+
 DB_PATH            = os.getenv("DB_PATH", "data/bot.db")
 DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
 
@@ -75,6 +78,16 @@ INSPIRATIONS = [
     "Birgalikda kuchlimiz. Bugun qilgan ishingiz ertaga boshqalarga ilhom bo‘ladi. 🌟",
     "Har yutuq — kichik urinishlardan boshlanadi. Siz uddalaysiz! 🚀",
 ]
+
+# =========================
+# Time helpers (LOCAL)
+# =========================
+def now_local_hhmm() -> str:
+    return datetime.now(TZ).strftime("%H:%M")
+
+def local_midnight_ts() -> int:
+    n = datetime.now(TZ)
+    return int(n.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 # =========================
 # Helpers
@@ -159,7 +172,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/set_admin <user_id>\n"
         "/set_inspire HH:MM [threshold]\n"
         "/hits_today, /export_hits [kun]\n"
-        "/whoami — your user id"
+        "/whoami — your user id\n"
+        "/debug_inspire — hozirgi sozlamani tekshirish\n"
+        "/send_inspire_now — darhol ilhom xabari yuborish"
     )
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,7 +257,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(update.effective_chat.id):
         return
-    since = int((datetime.utcnow() - timedelta(days=7)).timestamp())
+    since = int((datetime.now(TZ) - timedelta(days=7)).timestamp())
     top = storage.top_users(update.effective_chat.id, since, limit=10)
     total = storage.count_messages(update.effective_chat.id, since)
     if not total:
@@ -257,8 +272,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def digest_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(update.effective_chat.id):
         return
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    since = int(day_start.timestamp())
+    since = local_midnight_ts()
     msgs = storage.get_messages(update.effective_chat.id, since)
     if not msgs:
         await update.message.reply_text("Bugun uchun xabarlar yo‘q.")
@@ -269,7 +283,7 @@ async def digest_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def digest_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(update.effective_chat.id):
         return
-    since = int((datetime.utcnow() - timedelta(days=7)).timestamp())
+    since = int((datetime.now(TZ) - timedelta(days=7)).timestamp())
     msgs = storage.get_messages(update.effective_chat.id, since)
     if not msgs:
         await update.message.reply_text("7 kunlik xabarlar yo‘q.")
@@ -351,7 +365,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     transcript = await transcribe_file(path)
-    parts = [label]
+    parts = ["[media]", label]
     if caption:
         parts.append(caption)
     if transcript:
@@ -364,7 +378,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id=msg.from_user.id if msg.from_user else None,
         username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
         text=text_to_store if text_to_store else label,
-        date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+        date=int(msg.date.timestamp()) if msg.date else int(datetime.now(TZ).timestamp())
     )
 
     # keyword detection on caption/transcript
@@ -379,7 +393,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
                 matched=",".join(hits),
                 text=text_to_store,
-                date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+                date=int(msg.date.timestamp()) if msg.date else int(datetime.now(TZ).timestamp())
             )
         except Exception as e:
             log.debug("insert_keyword_hit failed: %s", e)
@@ -417,7 +431,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id=msg.from_user.id if msg.from_user else None,
         username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
         text=msg.text,
-        date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+        date=int(msg.date.timestamp()) if msg.date else int(datetime.now(TZ).timestamp())
     )
 
     kws = storage.get_keywords(chat.id) or ""
@@ -431,7 +445,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
                 matched=",".join(hits),
                 text=msg.text,
-                date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+                date=int(msg.date.timestamp()) if msg.date else int(datetime.now(TZ).timestamp())
             )
         except Exception as e:
             log.debug("insert_keyword_hit failed: %s", e)
@@ -449,10 +463,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Topilgan kalit so‘zlar: " + ", ".join(hits))
 
 # =========================
-# Extras: hits stats / export
+# Extras: hits stats / export / inspire debug
 # =========================
 async def hits_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    since = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    since = local_midnight_ts()
     n = storage.count_hits(update.effective_chat.id, since)
     await update.message.reply_text(f"Bugun kalit so‘z topilgan xabarlar: {n}")
 
@@ -461,33 +475,56 @@ async def export_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
         days = int(context.args[0]) if context.args else 7
     except:
         days = 7
-    since = int((datetime.utcnow() - timedelta(days=days)).timestamp())
+    since = int((datetime.now(TZ) - timedelta(days=days)).timestamp())
     rows = storage.get_hits(update.effective_chat.id, since)
     if not rows:
         await update.message.reply_text(f"Oxirgi {days} kunda kalit so‘z topilmadi.")
         return
     buf = io.StringIO(); w = csv.writer(buf)
-    w.writerow(["datetime_utc","user","matched_keywords","message"])
+    w.writerow(["datetime_local","user","matched_keywords","message"])
     for r in rows:
-        ts = datetime.utcfromtimestamp(r["date"]).strftime("%Y-%m-%d %H:%M")
+        ts = datetime.fromtimestamp(r["date"], TZ).strftime("%Y-%m-%d %H:%M")
         user = ("@" + r["username"]) if r.get("username") else (str(r.get("user_id") or ""))
         w.writerow([ts, user, r["matched"], r["text"].replace("\n"," ")])
     data = buf.getvalue().encode("utf-8-sig"); bio = io.BytesIO(data); bio.name = f"keyword_hits_{days}d.csv"
     await update.message.reply_document(document=bio, filename=bio.name,
         caption=f"Kalit so‘zlar bo‘yicha hitlar — oxirgi {days} kun")
 
+# Inspire debug helpers
+async def debug_inspire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    insp_time, insp_thr = storage.get_inspire(chat_id)
+    insp_time = insp_time or DEFAULT_INSPIRE_TIME
+    insp_thr = insp_thr or DEFAULT_INSPIRE_THRESHOLD
+    now = now_local_hhmm()
+    since = local_midnight_ts()
+    cnt = storage.count_messages(chat_id, since)
+    would = (insp_time == now and cnt >= insp_thr)
+    await update.message.reply_text(
+        "Inspire debug:\n"
+        f"- Now (local): {now}\n"
+        f"- Set time:    {insp_time}\n"
+        f"- Threshold:   {insp_thr}\n"
+        f"- Msg today:   {cnt}\n"
+        f"- Would send now? {'YES' if would else 'NO'}"
+    )
+
+async def send_inspire_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    msg = INSPIRATIONS[datetime.now(TZ).minute % len(INSPIRATIONS)]
+    await context.application.bot.send_message(chat_id=chat_id, text=msg)
+
 # =========================
 # Scheduler (daily digest + inspiration + admin DM)
 # =========================
 def setup_scheduler(app: Application):
     async def minute_tick():
-        now_local = datetime.now().strftime("%H:%M")
+        now_local = now_local_hhmm()
         for chat_id in storage.all_chats():
-            # Daily digest to group
+            # Daily digest to group (local time)
             desired = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
             if desired == now_local:
-                day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                since = int(day_start.timestamp())
+                since = local_midnight_ts()
                 msgs = storage.get_messages(chat_id, since)
                 if msgs:
                     digest = await summarize_window(client, OPENAI_MODEL, msgs, period_label="(kunlik)")
@@ -498,13 +535,13 @@ def setup_scheduler(app: Application):
                     if DM_ADMIN_DIGEST and storage.get_admin(chat_id):
                         await dm_admin(chat_id, f"[Daily Digest] Chat {chat_id}\n\n{digest}", app, parse_mode=ParseMode.MARKDOWN)
 
-            # Inspiration
+            # Inspiration (local time + local midnight counter)
             insp_time, insp_thr = storage.get_inspire(chat_id)
             insp_time = insp_time or DEFAULT_INSPIRE_TIME
             insp_thr  = insp_thr or DEFAULT_INSPIRE_THRESHOLD
             if insp_time == now_local:
-                day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                msg_count = storage.count_messages(chat_id, int(day_start.timestamp()))
+                since = local_midnight_ts()
+                msg_count = storage.count_messages(chat_id, since)
                 if msg_count >= insp_thr:
                     try:
                         msg = INSPIRATIONS[msg_count % len(INSPIRATIONS)]
@@ -546,6 +583,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("set_keywords", set_keywords))
     app.add_handler(CommandHandler("hits_today", hits_today))
     app.add_handler(CommandHandler("export_hits", export_hits))
+
+    # Debug helpers
+    app.add_handler(CommandHandler("debug_inspire", debug_inspire))
+    app.add_handler(CommandHandler("send_inspire_now", send_inspire_now))
 
     # Media first, then text
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE | filters.VOICE | filters.AUDIO, handle_media))
