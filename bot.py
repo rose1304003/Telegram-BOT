@@ -29,11 +29,17 @@ DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
 
 # behavior toggles
-KEYWORD_REPLY = os.getenv("KEYWORD_REPLY", "0") == "1"             # public reply on keyword? default silent
-DM_ADMIN_ON_KEYWORD = os.getenv("DM_ADMIN_ON_KEYWORD", "1") == "1" # DM admin for keyword hits
-DM_ADMIN_ON_SEARCH  = os.getenv("DM_ADMIN_ON_SEARCH", "1") == "1"  # DM admin for /search results
-DM_ADMIN_DIGEST     = os.getenv("DM_ADMIN_DIGEST", "1") == "1"     # DM admin daily digest
-AUTO_REPLY          = os.getenv("AUTO_REPLY", "1") == "1"          # generate suggested answer for admin DM
+KEYWORD_REPLY = os.getenv("KEYWORD_REPLY", "0") == "1"
+DM_DMIN_ON_KEYWORDS= os.getenv("DM_DMIN_ON_KEYWORDS", "0") == "1"
+DM_ADMIN_ON_SEARCH = os.getenv("DM_ADMIN_ON_SEARCH", "0") == "1"
+DM_ADMIN_STATS = os.getenv("DM_ADMIN_STATS", "0") == "1"
+DM_ADMIN_DIGEST_TIME = os.getenv("DM_ADMIN_DIGEST_TIME", "0") == "1"
+DM_ADMIN_DIGEST_WEEK = os.getenv("DM_ADMIN_DIGEST_WEEK", "0") == "1"
+DM_ADMIN_DIGEST_TODAY = os.getenv("DM_ADMIN_DIGEST_TODAY", "0") == "1"
+DM_ADMIN_KEYWORDS = os.getenv("DM_ADMIN_KEYWORDS", "0") == "1"
+DM_ADMIN_SET_KEYWORDS = os.getenv("DM_ADMIN_SET_KEYWORDS", "0") == "1"
+DM_ADMIN_HITS_TODAY = os.getenv("DM_ADMIN_HITS_TODAY", "0") == "1"
+DM_ADMIN_EXPORT_HITS = os.getenv("DM_ADMIN_EXPORT_HITS", "0") == "1"
 
 # optional event context to help auto-answers
 EVENT_CONTEXT = os.getenv("EVENT_CONTEXT", "")
@@ -400,3 +406,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
