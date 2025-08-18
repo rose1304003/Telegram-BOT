@@ -7,7 +7,8 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from openai import OpenAI
+
+from openai import OpenAI, AsyncOpenAI  # <-- async client added
 
 from telegram import Update
 from telegram.constants import ChatType, ParseMode
@@ -28,18 +29,12 @@ LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Tashkent")
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 DEFAULT_DIGEST_TIME = os.getenv("DEFAULT_DIGEST_TIME", "21:00")
 
-# behavior toggles
+# behavior toggles (fixed/added)
 KEYWORD_REPLY = os.getenv("KEYWORD_REPLY", "0") == "1"
-DM_DMIN_ON_KEYWORDS= os.getenv("DM_DMIN_ON_KEYWORDS", "0") == "1"
-DM_ADMIN_ON_SEARCH = os.getenv("DM_ADMIN_ON_SEARCH", "0") == "1"
-DM_ADMIN_STATS = os.getenv("DM_ADMIN_STATS", "0") == "1"
-DM_ADMIN_DIGEST_TIME = os.getenv("DM_ADMIN_DIGEST_TIME", "0") == "1"
-DM_ADMIN_DIGEST_WEEK = os.getenv("DM_ADMIN_DIGEST_WEEK", "0") == "1"
-DM_ADMIN_DIGEST_TODAY = os.getenv("DM_ADMIN_DIGEST_TODAY", "0") == "1"
-DM_ADMIN_KEYWORDS = os.getenv("DM_ADMIN_KEYWORDS", "0") == "1"
-DM_ADMIN_SET_KEYWORDS = os.getenv("DM_ADMIN_SET_KEYWORDS", "0") == "1"
-DM_ADMIN_HITS_TODAY = os.getenv("DM_ADMIN_HITS_TODAY", "0") == "1"
-DM_ADMIN_EXPORT_HITS = os.getenv("DM_ADMIN_EXPORT_HITS", "0") == "1"
+AUTO_REPLY    = os.getenv("AUTO_REPLY", "1") == "1"                    # NEW: was missing
+DM_ADMIN_ON_KEYWORD = os.getenv("DM_ADMIN_ON_KEYWORD", "1") == "1"     # FIX: unified name
+DM_ADMIN_ON_SEARCH  = os.getenv("DM_ADMIN_ON_SEARCH", "1") == "1"
+DM_ADMIN_DIGEST     = os.getenv("DM_ADMIN_DIGEST", "1") == "1"         # NEW: used in scheduler
 
 # optional event context to help auto-answers
 EVENT_CONTEXT = os.getenv("EVENT_CONTEXT", "")
@@ -57,7 +52,9 @@ ALLOWED_CHAT_IDS = [int(cid) for cid in os.getenv("ALLOWED_CHAT_IDS", "").replac
 if not TELEGRAM_BOT_TOKEN or not OPENAI_API_KEY:
     raise SystemExit("TELEGRAM_BOT_TOKEN or OPENAI_API_KEY missing")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client  = OpenAI(api_key=OPENAI_API_KEY)        # sync (fallback)
+aclient = AsyncOpenAI(api_key=OPENAI_API_KEY)   # async (for awaited calls)
+
 storage = Storage(DB_PATH)
 scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
 
@@ -81,7 +78,6 @@ async def dm_admin(chat_id: int, text: str, app: Application, parse_mode=None):
         await app.bot.send_message(chat_id=admin_id, text=text, parse_mode=parse_mode)
         return True
     except Forbidden:
-        # Admin hasn't started the bot in DM yet
         log.warning("Cannot DM admin %s. Ask them to /start the bot in DM.", admin_id)
         return False
     except Exception as e:
@@ -94,21 +90,32 @@ def format_user(u) -> str:
 async def suggested_answer(user_msg: str) -> str:
     if not AUTO_REPLY:
         return ""
+    sys = (
+        "You are a concise assistant for a Telegram event group. "
+        "Answer in 2–3 short sentences, helpful and precise. "
+        "Use the provided EVENT CONTEXT if relevant. If unsure, suggest what info is needed."
+    )
+    content = f"EVENT CONTEXT:\n{EVENT_CONTEXT}\n\nQUESTION:\n{user_msg}\n\nProvide a short, direct answer."
+    # async call (correct)
     try:
-        sys = (
-            "You are a concise assistant for a Telegram event group. "
-            "Answer in 2–3 short sentences, helpful and precise. "
-            "Use the provided EVENT CONTEXT if relevant. If unsure, suggest what info is needed."
-        )
-        content = f"EVENT CONTEXT:\n{EVENT_CONTEXT}\n\nQUESTION:\n{user_msg}\n\nProvide a short, direct answer."
-        resp = await client.chat.completions.create(
+        resp = await aclient.chat.completions.create(
             model=OPENAI_MODEL,
             temperature=0.2,
             messages=[{"role":"system","content":sys},{"role":"user","content":content}]
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        log.warning("Auto-reply generation failed: %s", e)
+        log.warning("Auto-reply (async) failed: %s", e)
+    # sync fallback (no await)
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.2,
+            messages=[{"role":"system","content":sys},{"role":"user","content":content}]
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e2:
+        log.warning("Auto-reply (sync fallback) failed: %s", e2)
         return ""
 
 # --- commands ---
@@ -145,16 +152,20 @@ async def set_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Iltimos, to‘g‘ri user_id kiriting (raqam).")
         return
     storage.set_admin(update.effective_chat.id, admin_id)
-    await update.message.reply_text(f"Admin DM yo‘naltirish o‘rnatildi: {admin_id}\n"
-                                    f"Admin botga DM orqali /start yuborishi kerak.")
+    await update.message.reply_text(
+        f"Admin DM yo‘naltirish o‘rnatildi: {admin_id}\n"
+        f"Admin botga DM orqali /start yuborishi kerak."
+    )
 
 async def set_inspire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(update.effective_chat.id):
         return
     if not context.args:
         t, th = storage.get_inspire(update.effective_chat.id)
-        await update.message.reply_text(f"Inspire: vaqt={t or DEFAULT_INSPIRE_TIME}, threshold={th or DEFAULT_INSPIRE_THRESHOLD}\n"
-                                        f"Namuna: /set_inspire 21:00 20")
+        await update.message.reply_text(
+            f"Inspire: vaqt={t or DEFAULT_INSPIRE_TIME}, threshold={th or DEFAULT_INSPIRE_THRESHOLD}\n"
+            f"Namuna: /set_inspire 21:00 20"
+        )
         return
     time_str = context.args[0]
     if not re.match(r"^\d{2}:\d{2}$", time_str):
@@ -178,7 +189,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     results = storage.search(update.effective_chat.id, query, limit=20)
     if DM_ADMIN_ON_SEARCH and storage.get_admin(update.effective_chat.id):
-        # send to admin DM
         if not results:
             await dm_admin(update.effective_chat.id, f"[Search] '{query}': hech narsa topilmadi.", context.application)
             await update.message.reply_text("Qidiruv natijalari admin DM'ga yuborildi.")
@@ -192,7 +202,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await dm_admin(update.effective_chat.id, "\n".join(lines), context.application)
         await update.message.reply_text("Qidiruv natijalari admin DM'ga yuborildi.")
     else:
-        # reply in group (fallback)
         if not results:
             await update.message.reply_text("Hech narsa topilmadi.")
             return
@@ -276,7 +285,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allow_chat(chat.id) or not msg or not msg.text:
         return
 
-    # store message
     storage.insert_message(
         chat_id=chat.id,
         message_id=msg.message_id,
@@ -290,15 +298,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kws = storage.get_keywords(chat.id) or ""
     hits = build_keyword_flags(msg.text, kws)
     if hits:
-        storage.insert_keyword_hit(
-            chat_id=chat.id,
-            message_id=msg.message_id,
-            user_id=msg.from_user.id if msg.from_user else None,
-            username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
-            matched=",".join(hits),
-            text=msg.text,
-            date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
-        )
+        # store hit (if table exists in your storage.py)
+        try:
+            storage.insert_keyword_hit(
+                chat_id=chat.id,
+                message_id=msg.message_id,
+                user_id=msg.from_user.id if msg.from_user else None,
+                username=msg.from_user.username if msg.from_user and msg.from_user.username else None,
+                matched=",".join(hits),
+                text=msg.text,
+                date=int(msg.date.timestamp()) if msg.date else int(datetime.utcnow().timestamp())
+            )
+        except Exception as e:
+            log.debug("insert_keyword_hit skipped/failed: %s", e)
+
         # DM admin with suggested answer (silent in group)
         if DM_ADMIN_ON_KEYWORD and storage.get_admin(chat.id):
             ans = await suggested_answer(msg.text)
@@ -308,6 +321,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Msg: {msg.text}\n\n"
                     f"Suggested answer:\n{ans or '(no suggestion)'}")
             await dm_admin(chat.id, text, context.application)
+
+        # optional public reply (default OFF)
         if KEYWORD_REPLY:
             await msg.reply_text("Topilgan kalit so‘zlar: " + ", ".join(hits))
 
@@ -342,7 +357,7 @@ def setup_scheduler(app: Application):
     async def minute_tick():
         now_local = datetime.now().strftime("%H:%M")
         for chat_id in storage.all_chats():
-            # send daily digest to group at its digest_time
+            # group daily digest
             desired = storage.get_digest_time(chat_id) or DEFAULT_DIGEST_TIME
             if desired == now_local:
                 day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -354,11 +369,11 @@ def setup_scheduler(app: Application):
                         await app.bot.send_message(chat_id=chat_id, text=digest, parse_mode=ParseMode.MARKDOWN)
                     except Exception as e:
                         log.warning("Send digest to %s failed: %s", chat_id, e)
-                    # DM admin version
+                    # DM admin copy
                     if DM_ADMIN_DIGEST and storage.get_admin(chat_id):
                         await dm_admin(chat_id, f"[Daily Digest] Chat {chat_id}\n\n{digest}", app, parse_mode=ParseMode.MARKDOWN)
 
-            # inspiration check (per chat settings or defaults)
+            # inspiration check
             insp_time, insp_thr = storage.get_inspire(chat_id)
             insp_time = insp_time or DEFAULT_INSPIRE_TIME
             insp_thr = insp_thr or DEFAULT_INSPIRE_THRESHOLD
@@ -406,4 +421,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
